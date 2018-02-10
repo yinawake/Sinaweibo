@@ -3,14 +3,18 @@
 Created on 6 Aug, 2014
 
 @author: burkun
+
+@modtime 2018/2/10  by yinc  支持python3.6 发送微博图片
 '''
-import urllib2, urllib
-from pyquery import PyQuery as pyq 
+import urllib.request as urllib2
+import urllib
+import urllib.parse
 import re, json, base64
 import rsa, binascii, time
 import pickle, os, random
-from cookielib import CookieJar
+from http.cookiejar import CookieJar
 
+from bs4 import BeautifulSoup
 
 
 class Log():
@@ -19,8 +23,8 @@ class Log():
         return "[" + time.strftime("%Y-%m-%d %H:%M:%S" ,time.localtime(time.time())) + " "+pre+"] "
     @staticmethod
     def info(msg, mtype = "info"):
-        f = open("log.txt", "wb")
-        f.write(Log.cur_time(mtype) + msg.encode("utf-8") + "\n")
+        f = open("log.txt", "w")
+        f.write(Log.cur_time(mtype) + msg + "\n")
         f.close()
     @staticmethod
     def error(msg):
@@ -67,7 +71,7 @@ class Weibo(object):
         #include cookie jar
         Log.info("cache cookie, the next time will auto login!")
         dd = {"cookies": [c for c in self.__cj], "uid" : self.__uid, "nick" : self.__nickname}
-        pickle.dump(dd, open("cookiejar.dat", "w"))
+        pickle.dump(dd, open("cookiejar.dat", "wb"))
     
     def __read_cj(self):
         MAX_EPS = 86400 #24 hours
@@ -76,7 +80,7 @@ class Weibo(object):
             if time.time() - modtime > MAX_EPS:
                 return None
             else:
-                dd = pickle.load(open("cookiejar.dat", "r"))
+                dd = pickle.load(open("cookiejar.dat", "rb"))
                 cj =  CookieJar()
                 for c in dd["cookies"]:
                     cj.set_cookie(c)
@@ -103,8 +107,14 @@ class Weibo(object):
     
     def __encode_passwd(self, pwd, servertime, nonce, pubkey):
         rsaPublickey = int(pubkey, 16)
-        key = rsa.PublicKey(rsaPublickey, 65537)  
-        message = str(servertime) + '\t' + str(nonce) + '\n' + str(pwd)  
+        key = rsa.PublicKey(rsaPublickey, 65537)
+
+        # key = rsa.PublicKey.load_pkcs1(pubkey)
+
+        message = str(servertime) + '\t' + str(nonce) + '\n' + str(pwd)
+        message = message.encode(encoding="utf-8")
+        print(message,'----------', rsaPublickey)
+        print(message, '----------', key.n)
         passwd = rsa.encrypt(message, key)
         passwd = binascii.b2a_hex(passwd)
         return passwd
@@ -112,6 +122,7 @@ class Weibo(object):
     def __nick_name(self):
         resp = self.__opener.open(url_home_pattern % self.__uid)
         html = resp.read()
+        html = html.decode(encoding="utf-8")
         nick_pattern = "$CONFIG['nick']='"
         idx = html.find(nick_pattern)
         idx += len(nick_pattern)
@@ -119,9 +130,9 @@ class Weibo(object):
         while html[idx] != "'":
             idx += 1
         return html[begin : idx]
-        
+
     def __encode_username(self, username):
-        username = bytes(urllib.quote(username))
+        username = bytes(urllib.parse.quote(username),encoding='utf-8')
         username = base64.encodestring(username)[:-1]
         return username
     
@@ -131,6 +142,7 @@ class Weibo(object):
     def __prelogin(self, su):
         pre_login = url_prelogin % su
         html = self.__opener.open(pre_login).read()
+        html = html.decode(encoding="utf-8")
         json_data = re.search('\((.*)\)', html).group(1)
         data = json.loads(json_data)
         if data["retcode"] == 0:
@@ -142,6 +154,8 @@ class Weibo(object):
             pcid = data["pcid"]
         else:
             raise Exception("Someting wrong in prelogin!")
+
+        print(data)
         return servertime, nonce, pubkey, rsakv, exectime, pcid
     
     def __login(self):
@@ -171,7 +185,7 @@ class Weibo(object):
                     }
 
 
-        postdata = urllib.urlencode(postdata).encode("utf-8")
+        postdata = urllib.parse.urlencode(postdata).encode("utf-8")
         html = self.__opener.open(url_login, postdata).read().decode('gbk')
         url_final = re.search('location\.replace\([\"|\'](.*?)[\"|\']\)', html).group(1)
         reason = url_final.split("reason=")
@@ -212,6 +226,7 @@ class Weibo(object):
             Log.error(html)
          
     def __get_uid(self, loginok_html):
+        loginok_html = loginok_html.decode(encoding="utf-8")
         self.__uid = re.search('"uniqueid":"(\d+)"', loginok_html).group(1)
         
     
@@ -246,17 +261,29 @@ class Weibo(object):
         try:
             htmldata = data['data']['html']
             #print htmldata
-            content = pyq(htmldata)
-            divs = content.find('div[node-type="feed_list_commentList"] .list_li')
+            # content = pyq(htmldata)
+            # divs = content.find('div[node-type="feed_list_commentList"] .list_li')
+            # res = {}
+            # for div in divs:
+            #     commid = div.attrib['comment_id']
+            #     comments = div.cssselect(".WB_text")
+            #     for com in comments:
+            #         res[commid] =  com.text_content().strip()
+
+            content = BeautifulSoup(htmldata, "lxml")
+            divs = content.find_all("div", class_="list_li", attrs={"node-type": "feed_list_commentList"})
             res = {}
             for div in divs:
-                commid = div.attrib['comment_id']
-                comments = div.cssselect(".WB_text")
+                commid = div['comment_id']
+                comments = div.find_all(class_="WB_text")
                 for com in comments:
-                    res[commid] =  com.text_content().strip()
+                    res[commid] = com.string.strip()
+
             return res
-        except Exception, e:
+        except Exception as e:
             Log.error(e)
+
+
         
     def get_new_post_comment(self, mid):
         if self.__commentCache is None:
@@ -288,6 +315,9 @@ class Weibo(object):
         req = UploadImg.getJpegRequest(imgPath, self.__uid, self.__nickname)
         resp = self.__opener.open(req)
         html = resp.read()
+        html = html.decode(encoding="utf-8")
+
+        print(html)
         matches = re.search('.*"code":"(.*?)".*"pid":"(.*?)"', html)
         if matches.group(1)  == "A00006":
             Log.info("upload success!")
@@ -300,7 +330,7 @@ class Weibo(object):
             return None
 
     def postTextWithImage(self, text, jpgpath):
-        POST_URL = "http://weibo.com/aj/mblog/add?ajwvr=6&__rnd= %s" % str(self.__get_rnd())
+        POST_URL = "https://weibo.com/p/aj/v6/mblog/add?ajwvr=6&domain=100505&__rnd= %s" % str(self.__get_rnd())
         pid = self.uploadJpegImg(jpgpath)
         post_data = {
                        "location":"v6_content_home",
@@ -318,6 +348,9 @@ class Weibo(object):
         #print req.get_full_url()
         resp = self.__opener.open(req)
         html = resp.read()
+        html = html.decode(encoding="utf-8")
+
+        print(html)
         data = json.loads(html)
         if data["code"] == "100000":
             Log.info("post text image is ok!")
@@ -326,7 +359,7 @@ class Weibo(object):
             Log.error(html)
         
     def __buildPostTextImageRequest(self, url, data):
-        return urllib2.Request(url, urllib.urlencode(data).encode("utf-8"))
+        return urllib2.Request(url, urllib.parse.urlencode(data).encode("utf-8"))
 class UploadImg():
     VIEW_URL = "http://ww2.sinaimg.cn/mw1024/%s.jpg"
     APIURL = 'http://picupload.service.weibo.com/interface/pic_upload.php?app=miniblog&data=1'
@@ -371,7 +404,7 @@ class UploadImg():
     
     @staticmethod
     def getJpegRequest(imgpath, uid, nick):
-        urldata = UploadImg.getBuildRequet(uid, urllib.quote(nick))
+        urldata = UploadImg.getBuildRequet(uid, urllib.parse.quote(nick))
         enurl = UploadImg.ensmbelUrl(urldata)
         f = open(imgpath, 'rb')
         data = f.read()
@@ -385,9 +418,9 @@ class UploadImg():
      
 if __name__ == '__main__':
     pass
-    #weibo = Weibo('burkun', '******')
-    #print weibo.uploadJpegImg("../test.JPG")
-    #weibo.postTextWithImage("机器发的第一个带图片的微博!!!很兴奋呐!!!", "../test.JPG")
+    weibo = Weibo('****', '****')
+    print(weibo.uploadJpegImg("./data/test.JPG"))
+    weibo.postTextWithImage("机器发的第一个带图片的微博!!!很兴奋呐!!!", "./data/test.JPG")
     #weibo.decide_post_comment();
     #weibo.get_comment('3856489792158325')
     
